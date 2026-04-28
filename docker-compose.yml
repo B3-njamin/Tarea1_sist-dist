@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+
+  redis-cache:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    # configurar las políticas LRU, LFU, etc.
+    command: ["redis-server", "--maxmemory", "50mb", "--maxmemory-policy", "allkeys-lfu"]  
+
+  generador-respuestas:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app  #vinculo código local con el contenedor para ver cambios en vivo
+    depends_on:
+      - redis-cache
+
+  generador-trafico:
+    build: .
+    # Comando que ejecutará este contenedor: --n {Numero de peticiones} peticiones con distribución uniforme y aleatoria
+    command: python generador_trafico.py --dist uniforme --n 1000
+    depends_on:
+      - generador-respuestas
