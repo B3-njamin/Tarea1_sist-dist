@@ -6,21 +6,56 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    # configurar las políticas LRU, LFU, etc.
-    command: ["redis-server", "--maxmemory", "50mb", "--maxmemory-policy", "allkeys-lfu"]  
+    command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lfu
+    networks:
+      - sd-network
 
-  generador-respuestas:
-    build: .
+  server-backend:
+    build: ./server/backend
     ports:
       - "8000:8000"
     volumes:
-      - .:/app  #vinculo código local con el contenedor para ver cambios en vivo
+      - ./967_buildings.csv:/app/967_buildings.csv:ro
+      - sqlite-data:/app/data
     depends_on:
       - redis-cache
+    environment:
+      - REDIS_HOST=redis-cache
+    networks:
+      - sd-network
 
-  generador-trafico:
-    build: .
-    # Comando que ejecutará este contenedor: --n {Numero de peticiones} peticiones con distribución uniforme y aleatoria
-    command: python generador_trafico.py --dist uniforme --n 1000
+  server-frontend:
+    build: ./server/frontend
+    ports:
+      - "3000:3000"
     depends_on:
-      - generador-respuestas
+      - server-backend
+    networks:
+      - sd-network
+
+  client-backend:
+    build: ./client/backend
+    ports:
+      - "8001:8001"
+    depends_on:
+      - server-backend
+    environment:
+      - SERVER_URL=http://server-backend:8000
+    networks:
+      - sd-network
+
+  client-frontend:
+    build: ./client/frontend
+    ports:
+      - "3001:3001"
+    depends_on:
+      - client-backend
+    networks:
+      - sd-network
+
+volumes:
+  sqlite-data:
+
+networks:
+  sd-network:
+    driver: bridge

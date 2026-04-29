@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Dashboard Servidor — Tarea 1 SD</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link rel="stylesheet" href="css/styles.css"/>
+</head>
+<body class="bg-light">
+
+<nav class="navbar navbar-dark bg-dark px-4">
+  <span class="navbar-brand fw-bold">🖥️ Panel del Servidor — Tarea 1 SD</span>
+</nav>
+
+<div class="container-fluid mt-4">
+  <ul class="nav nav-tabs mb-4" id="mainTabs">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-config">⚙️ Configuración</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-live">📡 En Vivo</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-history">📋 Historial</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-graphs">📊 Gráficos</a></li>
+  </ul>
+
+  <div class="tab-content">
+
+    <!-- TAB CONFIGURACIÓN -->
+    <div class="tab-pane fade show active" id="tab-config">
+      <div class="row justify-content-center">
+        <div class="col-md-6">
+          <div class="card shadow">
+            <div class="card-header bg-dark text-white fw-bold">Configuración del Caché</div>
+            <div class="card-body">
+              <div class="mb-3">
+                <label class="form-label fw-semibold">Política de Evicción</label>
+                <select class="form-select" id="cfg-policy">
+                  <option value="allkeys-lfu">LFU — Least Frequently Used</option>
+                  <option value="allkeys-lru">LRU — Least Recently Used</option>
+                  <option value="allkeys-random">FIFO (aproximado) — Random</option>
+                </select>
+              </div>
+              <div class="mb-3">
+                <label class="form-label fw-semibold">Tamaño de Memoria</label>
+                <select class="form-select" id="cfg-memory">
+                  <option value="50">50 MB</option>
+                  <option value="200">200 MB</option>
+                  <option value="500">500 MB</option>
+                </select>
+              </div>
+              <div class="mb-3">
+                <label class="form-label fw-semibold">TTL (segundos) — 0 = sin expiración</label>
+                <input type="number" class="form-control" id="cfg-ttl" value="60" min="0"/>
+              </div>
+              <button class="btn btn-dark w-100" onclick="applyConfig()">Aplicar Configuración</button>
+              <div id="cfg-msg" class="mt-2 text-center fw-semibold"></div>
+            </div>
+          </div>
+          <div class="card shadow mt-4">
+            <div class="card-header bg-secondary text-white fw-bold">Configuración Actual</div>
+            <div class="card-body" id="current-config-display">Cargando...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB EN VIVO -->
+    <div class="tab-pane fade" id="tab-live">
+      <div class="row g-3 justify-content-center" id="live-cards">
+        <div class="col-md-2"><div class="card text-center shadow"><div class="card-body"><h6 class="text-muted">Total</h6><p class="display-6 fw-bold" id="live-total">0</p></div></div></div>
+        <div class="col-md-2"><div class="card text-center shadow border-success"><div class="card-body"><h6 class="text-muted">Hits</h6><p class="display-6 fw-bold text-success" id="live-hits">0</p></div></div></div>
+        <div class="col-md-2"><div class="card text-center shadow border-danger"><div class="card-body"><h6 class="text-muted">Misses</h6><p class="display-6 fw-bold text-danger" id="live-misses">0</p></div></div></div>
+        <div class="col-md-2"><div class="card text-center shadow border-primary"><div class="card-body"><h6 class="text-muted">Hit Rate</h6><p class="display-6 fw-bold text-primary" id="live-hitrate">0%</p></div></div></div>
+        <div class="col-md-2"><div class="card text-center shadow border-warning"><div class="card-body"><h6 class="text-muted">Latencia p50</h6><p class="display-6 fw-bold text-warning" id="live-p50">0ms</p></div></div></div>
+        <div class="col-md-2"><div class="card text-center shadow border-warning"><div class="card-body"><h6 class="text-muted">Latencia p95</h6><p class="display-6 fw-bold text-warning" id="live-p95">0ms</p></div></div></div>
+      </div>
+      <p class="text-center text-muted mt-3 small">Actualizando cada segundo...</p>
+    </div>
+
+    <!-- TAB HISTORIAL -->
+    <div class="tab-pane fade" id="tab-history">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="mb-0">Historial de Experimentos</h5>
+        <button class="btn btn-sm btn-outline-danger" onclick="clearHistory()">Limpiar historial</button>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped table-hover align-middle small">
+          <thead class="table-dark">
+            <tr>
+              <th>#</th><th>Fecha</th><th>Distribución</th><th>Política</th>
+              <th>Mem (MB)</th><th>TTL (s)</th><th>Consultas</th>
+              <th>Hit Rate</th><th>Throughput</th><th>p50 (ms)</th>
+              <th>p95 (ms)</th><th>Eviction/min</th><th>Efficiency</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr><td colspan="13" class="text-center">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- TAB GRÁFICOS -->
+    <div class="tab-pane fade" id="tab-graphs">
+      <div class="row mb-3 g-2 align-items-end">
+        <div class="col-md-2">
+          <label class="form-label fw-semibold small">Variable X</label>
+          <select class="form-select form-select-sm" id="graph-x" onchange="updateFixedSelectors()">
+            <option value="ttl_seconds">TTL</option>
+            <option value="policy">Política</option>
+            <option value="memory_mb">Memoria</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label fw-semibold small">Métrica Y</label>
+          <select class="form-select form-select-sm" id="graph-y">
+            <option value="hit_rate">Hit Rate</option>
+            <option value="throughput">Throughput</option>
+            <option value="latency_p50">Latencia p50</option>
+            <option value="latency_p95">Latencia p95</option>
+            <option value="eviction_rate">Eviction Rate</option>
+            <option value="cache_efficiency">Cache Efficiency</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label fw-semibold small">Distribución</label>
+          <select class="form-select form-select-sm" id="graph-dist">
+            <option value="all">Todas</option>
+            <option value="zipf">Zipf</option>
+            <option value="uniforme">Uniforme</option>
+          </select>
+        </div>
+        <div class="col-md-2" id="fix-policy-col">
+          <label class="form-label fw-semibold small">Fijar Política</label>
+          <select class="form-select form-select-sm" id="fix-policy">
+            <option value="all">Todas</option>
+            <option value="allkeys-lfu">LFU</option>
+            <option value="allkeys-lru">LRU</option>
+            <option value="allkeys-random">FIFO</option>
+          </select>
+        </div>
+        <div class="col-md-2" id="fix-memory-col">
+          <label class="form-label fw-semibold small">Fijar Memoria</label>
+          <select class="form-select form-select-sm" id="fix-memory">
+            <option value="all">Todas</option>
+            <option value="50">50 MB</option>
+            <option value="200">200 MB</option>
+            <option value="500">500 MB</option>
+          </select>
+        </div>
+        <div class="col-md-2" id="fix-ttl-col">
+          <label class="form-label fw-semibold small">Fijar TTL</label>
+          <select class="form-select form-select-sm" id="fix-ttl">
+            <option value="all">Todos</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-dark btn-sm w-100" onclick="renderChart()">Actualizar Gráfico</button>
+        </div>
+      </div>
+      <div class="card shadow p-3">
+        <canvas id="mainChart" height="100"></canvas>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,451 @@
+\documentclass[letter,12pt]{article}
+\usepackage[paperheight=27.94cm,paperwidth=21.59cm,bindingoffset=0in,left=3cm,right=2.0cm,top=3.5cm,bottom=2.5cm,headheight=200pt,headsep=1.0\baselineskip]{geometry}
+\usepackage{graphicx,lastpage}
+\usepackage{upgreek}
+\usepackage{censor}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage{pdfpages}
+\usepackage{tabularx}
+\usepackage{graphicx}
+\usepackage{adjustbox}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{rotating}
+\usepackage{multirow}
+\usepackage[utf8]{inputenc}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\renewcommand{\tablename}{Tabla}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+
+\begin{document}
+
+\title{\Huge{Tarea 1 Sistemas Distribuidos} \\
+  \large Plataforma de análisis de preguntas y respuestas en Internet}
+\author{\\Dante Libiot, dante.libiot@mail.udp.cl\\ \\ \textbf{Profesor: } Nicolás Hidalgo}
+\date{Abril, 2026}
+\maketitle
+
+\tableofcontents
+
+\newpage
+
+% ============================================================
+\section{Introducción}
+% ============================================================
+
+El objetivo de este trabajo es diseñar e implementar un sistema de caché distribuido para
+optimizar consultas geoespaciales sobre edificaciones en Santiago. El problema es simple:
+cuando se consulta repetidamente la misma información, recalcular la respuesta cada vez
+es ineficiente. La solución es guardar las respuestas en caché para que las consultas
+repetidas se respondan desde memoria sin reprocesar los datos.
+
+Se usa \textbf{Redis} como caché porque almacena datos en RAM, lo que lo hace
+significativamente más rápido que releer un archivo o consultar una base de datos.
+Además, al ser un servicio independiente, puede ser compartido por múltiples servidores,
+lo que lo hace apropiado en un contexto distribuido.
+
+% ============================================================
+\section{Diseño de la Arquitectura}
+% ============================================================
+
+\subsection{Descripción General}
+
+El sistema sigue una \textbf{arquitectura cliente-servidor de dos capas (2-tier)}.
+El frontend actúa como \textit{thin client}: no tiene lógica de negocio, no sabe nada
+de Redis ni del dataset, y su única función es mostrar información y mandar órdenes al
+backend vía HTTP. El backend concentra toda la lógica: gestiona Redis, procesa consultas,
+registra métricas y persiste el historial.
+
+Esta separación tiene ventajas prácticas: el cliente es liviano (corre en cualquier
+browser sin instalación), y si se modifica la lógica del caché o la política de evicción,
+solo se toca el backend.
+
+El flujo es el siguiente: el Generador de Tráfico manda consultas al Sistema de Caché.
+Si la respuesta existe en Redis (\textit{hit}), se retorna de inmediato. Si no existe
+(\textit{miss}), el Generador de Respuestas la calcula desde los datos en memoria, la
+guarda en Redis y la retorna. Las métricas se registran en cada paso.
+
+\subsection{Componentes Principales}
+
+\subsubsection{Generador de Tráfico}
+Simula consultas de empresas de logística sobre zonas de Santiago. Cada consulta combina:
+\begin{itemize}
+    \item \textbf{Zona geográfica} (Z1--Z5): seleccionada según la distribución configurada (uniforme o Zipf).
+    \item \textbf{Tipo de consulta} (Q1--Q5): seleccionado de forma uniforme al azar.
+    \item \textbf{Parámetros}: \texttt{confidence\_min} $\in [0,1]$ redondeado a 2 decimales para Q1--Q4; \texttt{bins} $\in \{5,10,20\}$ para Q5.
+\end{itemize}
+
+\subsubsection{Sistema de Caché (Redis)}
+Recibe cada consulta, genera una clave única del formato \texttt{tipo:zona:parámetros},
+y busca esa clave en Redis. Si existe, retorna la respuesta guardada. Si no, delega al
+Generador de Respuestas y almacena el resultado con el TTL configurado.
+
+\subsubsection{Generador de Respuestas}
+Procesa las consultas que el caché no pudo responder, operando sobre los datos cargados
+en memoria al inicio. No accede a disco durante la ejecución.
+
+\subsubsection{Almacenamiento de Métricas}
+Registra hits, misses, latencias, throughput y evictions. Al terminar cada experimento,
+guarda un resumen completo en SQLite.
+
+% ============================================================
+\section{Implementación}
+% ============================================================
+
+\subsection{Dataset: Google Open Buildings}
+
+Se usa el dataset Google Open Buildings, tile de Chile central, con $\sim$1.706.965
+registros donde cada fila representa un edificio detectado por satélite. Los campos
+relevantes son:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Campo} & \textbf{Tipo} & \textbf{Descripción} \\
+\midrule
+\texttt{latitude}         & FLOAT & Latitud del centroide \\
+\texttt{longitude}        & FLOAT & Longitud del centroide \\
+\texttt{area\_in\_meters} & FLOAT & Área del edificio (m²) \\
+\texttt{confidence}       & FLOAT & Certeza de detección {[}0, 1{]} \\
+\bottomrule
+\end{tabular}
+\caption{Campos del dataset utilizados.}
+\end{table}
+
+\texttt{confidence} indica qué tan seguro está el modelo de que el objeto detectado es
+un edificio. Actúa como filtro de calidad en Q1--Q4 y como variable de análisis en Q5.
+Al iniciar el sistema se cargan todos los datos en memoria y se filtran los $\sim$29.170
+edificios dentro de las cinco zonas, descartando el resto.
+
+\subsection{Zonas Geográficas}
+
+Cada zona es un rectángulo de coordenadas (\textit{bounding box}). Solo los edificios
+dentro de esos límites se consideran para esa zona.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llrrrr}
+\toprule
+\textbf{Zona} & \textbf{Nombre} & \textbf{lat\_min} & \textbf{lat\_max} & \textbf{lon\_min} & \textbf{lon\_max} \\
+\midrule
+Z1 & Providencia      & $-33{,}445$ & $-33{,}420$ & $-70{,}640$ & $-70{,}600$ \\
+Z2 & Las Condes       & $-33{,}420$ & $-33{,}390$ & $-70{,}600$ & $-70{,}550$ \\
+Z3 & Maipú            & $-33{,}530$ & $-33{,}490$ & $-70{,}790$ & $-70{,}740$ \\
+Z4 & Santiago Centro  & $-33{,}460$ & $-33{,}430$ & $-70{,}670$ & $-70{,}630$ \\
+Z5 & Pudahuel         & $-33{,}470$ & $-33{,}430$ & $-70{,}810$ & $-70{,}760$ \\
+\bottomrule
+\end{tabular}
+\caption{Zonas geográficas con sus bounding boxes.}
+\end{table}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llr}
+\toprule
+\textbf{Zona} & \textbf{Nombre} & \textbf{Edificios} \\
+\midrule
+Z1 & Providencia      & 2.750  \\
+Z2 & Las Condes       & 5.048  \\
+Z3 & Maipú            & 13.250 \\
+Z4 & Santiago Centro  & 4.350  \\
+Z5 & Pudahuel         & 3.772  \\
+\midrule
+   & \textbf{Total}   & \textbf{29.170} \\
+\bottomrule
+\end{tabular}
+\caption{Edificios por zona tras el filtrado inicial.}
+\end{table}
+
+\subsection{Tipos de Consultas (Q1--Q5)}
+
+\subsubsection{Q1 --- Conteo de edificios}
+Cuenta cuántos edificios de una zona tienen \texttt{confidence} $\geq$ umbral.\\
+\textbf{Cache key:} \texttt{count:\{zona\}:conf=\{confidence\_min\}}
+
+\subsubsection{Q2 --- Área promedio y total}
+Calcula área promedio y total de los edificios filtrados por confianza.\\
+\textbf{Cache key:} \texttt{area:\{zona\}:conf=\{confidence\_min\}}
+
+\subsubsection{Q3 --- Densidad por km²}
+Divide el conteo de Q1 por el área de la zona para comparar sectores de distinto tamaño.\\
+\textbf{Cache key:} \texttt{density:\{zona\}:conf=\{confidence\_min\}}
+
+\subsubsection{Q4 --- Comparación de densidad entre dos zonas}
+Compara la densidad de dos zonas y retorna cuál tiene mayor concentración.\\
+\textbf{Cache key:} \texttt{compare:density:\{zona\_a\}:\{zona\_b\}:conf=\{confidence\_min\}}
+
+\subsubsection{Q5 --- Distribución de confianza}
+Genera un histograma de los valores de \texttt{confidence} de una zona, agrupados en
+\texttt{bins} intervalos. A diferencia de Q1--Q4, aquí \texttt{confidence} no es un
+filtro sino el objeto de análisis.\\
+\textbf{Cache key:} \texttt{confidence\_dist:\{zona\}:bins=\{bins\}}
+
+% ============================================================
+\section{Experimentos y Resultados}
+% ============================================================
+
+\subsection{Decisiones de Diseño}
+
+\subsubsection{Arquitectura de Contenedores}
+
+El sistema se despliega en \textbf{5 contenedores Docker} orquestados con un único
+\texttt{docker-compose.yml} dentro de la misma red interna. Esto permite levantarlo
+completo con un solo \texttt{docker-compose up} sin configuración manual.
+
+\textbf{Redis} usa la imagen oficial Alpine. La política de evicción y el tamaño de
+memoria son configurables en caliente desde el frontend, sin tocar el compose.
+
+\textbf{Backend Servidor} (Python + FastAPI): núcleo del sistema. Procesa Q1--Q5,
+maneja Redis, registra métricas y guarda el historial en SQLite via SQLAlchemy.
+
+\textbf{Frontend Servidor} (HTML/JS + Bootstrap + Chart.js): permite configurar TTL,
+política y memoria, ver métricas en vivo y comparar experimentos en gráficos. Todo
+servido por FastAPI como archivos estáticos, sin framework JS.
+
+\textbf{Backend Cliente} (Python + FastAPI): recibe la orden del frontend, avisa al
+servidor qué distribución se usará y genera las consultas de forma asíncrona. Se optó
+por tareas asíncronas dentro del mismo proceso en lugar de contenedores dinámicos,
+ya que levantar un contenedor por consulta sería innecesariamente costoso.
+
+\textbf{Frontend Cliente} (HTML/JS + Bootstrap): permite configurar distribución y
+número de consultas, y muestra el progreso en tiempo real.
+
+\textbf{Persistencia}: SQLite en volumen Docker. Cada experimento queda registrado con
+todos sus parámetros y métricas, lo que permite construir gráficos comparativos de forma
+acumulativa.
+
+\subsubsection{Distribuciones de Tráfico}
+
+Se implementan dos distribuciones para la selección de zonas, que representan dos
+comportamientos opuestos:
+
+\textbf{Distribución uniforme}: reparte el tráfico equitativamente entre las 5 zonas.
+Las repeticiones de consultas ocurren por azar y el hit rate resultante es relativamente bajo.
+
+\textbf{Distribución Zipf} (parámetro $s=1{,}5$): concentra el tráfico en pocas zonas,
+replicando el comportamiento real donde ciertos sectores se consultan mucho más que otros.
+Con $s=1{,}5$, Z1 recibe $\approx$57\% del tráfico y Z5 menos del 5\%. Esto genera
+patrones de repetición claros que benefician al caché: las zonas populares permanecen
+en Redis y el hit rate sube considerablemente respecto a la distribución uniforme.
+
+\subsubsection{Políticas de Evicción}
+
+Cuando el caché se llena, Redis elimina entradas según la política configurada. Se
+evalúan tres:
+
+\textbf{LFU (Least Frequently Used)}: elimina la entrada menos consultada en total.
+Es la política esperada como mejor bajo Zipf, porque preserva exactamente las zonas
+más populares y elimina las raramente consultadas.
+
+\textbf{LRU (Least Recently Used)}: elimina la entrada que lleva más tiempo sin ser
+consultada. Funciona bien bajo distribución uniforme donde no hay un patrón claro de
+popularidad. Bajo Zipf puede eliminar entradas populares si no fueron consultadas
+recientemente, aunque en el largo plazo son las más pedidas.
+
+\textbf{FIFO (First In, First Out)}: elimina la entrada más antigua sin considerar
+frecuencia ni recencia. Se incluye como contraste negativo: al ignorar el patrón de
+acceso, se espera que sea la peor política en ambas distribuciones.
+
+La hipótesis es: LFU $>$ LRU $>$ FIFO bajo Zipf, y LRU $\approx$ LFU $>$ FIFO
+bajo distribución uniforme.
+
+\subsubsection{TTL}
+
+El dataset es \textbf{estático}: el CSV nunca cambia durante la ejecución, por lo que
+el TTL no sirve para mantener datos frescos. Su función real aquí es controlar cuánto
+tiempo vive una entrada en el caché, lo que afecta directamente el hit rate: sin TTL
+las entradas nunca expiran y el hit rate es máximo; con TTL bajo las entradas se
+regeneran constantemente y el hit rate cae.
+
+Los valores de TTL se definieron como fracciones de la duración total del experimento
+$T = 180$ s (18.000 consultas $\times$ 10 ms/consulta):
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llll}
+\toprule
+\textbf{TTL} & \textbf{Valor} & \textbf{Fracción de $T$} & \textbf{Interpretación} \\
+\midrule
+$0$ s              & 0 s      & 0\%   & Sin caché: ninguna entrada se retiene \\
+$0{,}25 \cdot T$ s & 45 s     & 25\%  & Las entradas expiran en el primer cuartil \\
+$0{,}50 \cdot T$ s & 90 s     & 50\%  & Las entradas duran la mitad del experimento \\
+$0{,}75 \cdot T$ s & 135 s    & 75\%  & Las entradas duran tres cuartos del experimento \\
+Sin TTL            & $\infty$ & 100\% & Hit rate máximo: nada expira \\
+\bottomrule
+\end{tabular}
+\caption{Valores de TTL. $T = 180$ s = 18.000 consultas $\times$ 10 ms/consulta.}
+\end{table}
+
+Los extremos (TTL=0 y sin TTL) son referencias teóricas. Los tres valores intermedios
+permiten observar cómo cambia el hit rate a medida que las entradas viven más tiempo.
+
+\subsubsection{Espacio de Claves y Decisión de Precisión de \texttt{confidence\_min}}
+
+Para que los tres tamaños de caché (50 MB, 200 MB, 500 MB) muestren diferencias
+observables, es necesario cumplir dos condiciones: (1) que las consultas se repitan
+lo suficiente como para generar hits, y (2) que el espacio total de claves supere
+los 500 MB para que ningún tamaño pueda guardarlo todo.
+
+La precisión de \texttt{confidence\_min} controla directamente cuántas claves distintas
+existen, generando una tensión:
+
+\begin{itemize}
+    \item \textbf{Más decimales} $\rightarrow$ más claves posibles $\rightarrow$ las consultas casi no se repiten $\rightarrow$ hit rate $\approx$ 0\%.
+    \item \textbf{Menos decimales} $\rightarrow$ pocas claves $\rightarrow$ el caché se llena rápido y todo es hit $\rightarrow$ las tres configuraciones de memoria son indistinguibles.
+\end{itemize}
+
+Con \textbf{4 decimales} hay más de 40.000 claves posibles; en 18.000 consultas casi
+no hay repeticiones. Con \textbf{1 decimal} hay $\sim$550 claves; el caché se llena en
+los primeros minutos y después da igual el tamaño. Con \textbf{2 decimales} se obtienen
+101 valores posibles de \texttt{confidence\_min} y 4.055 claves únicas totales, punto
+de equilibrio que combinado con Zipf genera hits relevantes sin saturar ningún tamaño.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrr}
+\toprule
+\textbf{Tipo de consulta} & \textbf{Claves posibles} & \textbf{Cálculo} \\
+\midrule
+Q1, Q2, Q3 & 1.515 & $5 \text{ zonas} \times 101 \times 3$ \\
+Q4          & 2.525 & $25 \text{ pares} \times 101$ \\
+Q5          & 15    & $5 \text{ zonas} \times 3 \text{ bins}$ \\
+\midrule
+\textbf{Total} & \textbf{4.055} & \\
+\bottomrule
+\end{tabular}
+\caption{Universo de claves únicas con 2 decimales en \texttt{confidence\_min}.}
+\end{table}
+
+\subsubsection{Padding para Estresar la Memoria}
+
+Con 4.055 claves y respuestas JSON de $\sim$100 bytes cada una, el espacio total sería
+$\sim$400 KB, mucho menor que los 50 MB del caché más pequeño. Redis nunca evictaría
+nada y los tres tamaños de memoria serían equivalentes.
+
+Para forzar presión de memoria, cada respuesta almacenada en Redis incluye un campo
+\texttt{\_pad} de 160 KB que \textbf{no se retorna al cliente}: se agrega al escribir
+en Redis y se elimina al leer antes de responder. Esto simula que las respuestas
+incluyen datos adicionales (geometrías, metadatos) sin afectar la latencia percibida.
+
+Con esto, el espacio total posible es:
+\[
+4.055 \text{ claves} \times 160\ \text{KB} \approx \mathbf{619\ \text{MB}}
+\]
+
+Este valor supera los 500 MB, asegurando que ninguno de los tres tamaños pueda almacenar
+todo el universo de respuestas:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Tamaño} & \textbf{Entradas máx.} & \textbf{\% del espacio total} & \textbf{Evicciones esperadas} \\
+\midrule
+50 MB  & $\sim$312   & 7{,}7\%  & Muchas \\
+200 MB & $\sim$1.250 & 30{,}8\% & Moderadas \\
+500 MB & $\sim$3.125 & 77{,}1\% & Pocas \\
+\bottomrule
+\end{tabular}
+\caption{Capacidad y presión esperada por configuración de caché.}
+\end{table}
+
+\subsubsection{Número de Consultas por Experimento}
+
+Se eligieron \textbf{18.000 consultas} por dos razones. Primero, garantizar que el caché
+más grande (500 MB, $\sim$3.125 entradas) se llene completamente y aún queden suficientes
+consultas para que las políticas de evicción actúen: con 18.000 consultas quedan
+$\sim$14.875 después de llenar el caché, una razón de $\approx 4{,}7:1$ entre fase
+estable y fase de llenado. Segundo, a 10 ms por consulta esto equivale a $T = 180$ s
+$\approx$ 3 minutos por experimento, tiempo razonable para ejecutar múltiples corridas.
+
+\subsection{Métricas de Evaluación}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Métrica} & \textbf{Definición} \\
+\midrule
+Hit rate         & $\dfrac{\text{hits}}{\text{hits} + \text{misses}}$ \\[1em]
+Throughput       & Consultas por segundo \\[0.5em]
+Latencia p50/p95 & Percentiles 50 y 95 del tiempo de respuesta \\[0.5em]
+Eviction rate    & Evicciones por minuto \\[0.5em]
+Cache efficiency & $\dfrac{\text{hits} \cdot t_{\text{cache}} - \text{misses} \cdot t_{\text{db}}}{\text{total}}$ \\
+\bottomrule
+\end{tabular}
+\caption{Métricas de evaluación del sistema.}
+\end{table}
+
+Se usan percentiles (p50/p95) en lugar del promedio simple porque el promedio se distorsiona
+con valores extremos, ocultando problemas reales de rendimiento.
+
+\subsection{Resultados}
+
+\textit{Esta sección se completará con los resultados empíricos de los experimentos,
+incluyendo gráficos comparativos de hit rate, latencia, throughput y eviction rate.}
+
+% ============================================================
+\section{Discusión}
+% ============================================================
+
+\textit{Esta sección se completará respondiendo las preguntas del enunciado con base
+en los resultados obtenidos.}
+
+% ============================================================
+\section{Conclusiones}
+% ============================================================
+
+\textit{Esta sección se completará una vez finalizados los experimentos.}
+
+% ============================================================
+\section{Referencias}
+% ============================================================
+
+\begin{itemize}
+    \item Google Open Buildings Dataset: \url{https://sites.research.google/gr/open-buildings/}
+    \item Redis Documentation: \url{https://redis.io/docs/}
+    \item Docker Documentation: \url{https://docs.docker.com/}
+\end{itemize}
+
+\section*{Links}
+\begin{enumerate}
+    \item Repositorio de Github:
+    \item Video de funcionamiento en Youtube:
+\end{enumerate}
+
+\end{document}
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       

@@ -1,0 +1,8 @@
+967_buildings.csv
+__pycache__/
+*.pyc
+pandas_env/
+*.aux
+*.log
+*.fdb_latexmk
+*.synctex*
