@@ -31,13 +31,13 @@ async function loadConfig() {
     const res  = await fetch(`${API}/api/config`);
     const data = await res.json();
     const policyNames = {
-      "allkeys-lfu": "LFU", "allkeys-lru": "LRU", "allkeys-random": "FIFO (aprox.)"
+      "allkeys-lfu": "LFU", "allkeys-lru": "LRU"
     };
     document.getElementById("current-config-display").innerHTML = `
       <ul class="list-unstyled mb-0">
         <li>🔁 <strong>Política:</strong> ${policyNames[data.policy] || data.policy}</li>
         <li>💾 <strong>Memoria:</strong> ${data.memory_mb} MB</li>
-        <li>⏱️ <strong>TTL:</strong> ${data.ttl === 0 ? "Sin expiración" : data.ttl + " segundos"}</li>
+        <li>⏱️ <strong>TTL:</strong> ${data.ttl === 0 ? "Sin caché (hit rate 0%)" : data.ttl + " segundos"}</li>
       </ul>`;
     document.getElementById("cfg-policy").value = data.policy;
     document.getElementById("cfg-memory").value = data.memory_mb;

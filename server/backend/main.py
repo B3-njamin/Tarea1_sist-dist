@@ -164,28 +164,33 @@ def calcular_percentiles():
 
 def set_cache(key: str, value: str):
     ttl = current_config["ttl"]
-    if ttl == 0:
-        cache.set(key, value)
-    else:
-        cache.setex(key, ttl, value)
+    cache.setex(key, ttl, value)
 
 # ============================================================
 # HANDLER GENÉRICO DE CONSULTAS
 # ============================================================
 def handle_query(cache_key: str, compute_fn):
     t_start = time.time()
+
+    # TTL=0 → sin caché: todo es miss, nada se guarda en Redis
+    if current_config["ttl"] == 0:
+        resultado = compute_fn()
+        registrar_latencia((time.time() - t_start) * 1000)
+        registrar_metrica("miss")
+        return resultado
+
     cached = cache.get(cache_key)
     if cached:
         registrar_latencia((time.time() - t_start) * 1000)
         registrar_metrica("hit")
         data = json.loads(cached)
-        data.pop("_pad", None)  # strip padding antes de retornar al cliente
+        data.pop("_pad", None)
         return data
     resultado = compute_fn()
     registrar_latencia((time.time() - t_start) * 1000)
     registrar_metrica("miss")
     to_cache = dict(resultado)
-    to_cache["_pad"] = PAD  # padding solo en Redis, no en respuesta HTTP
+    to_cache["_pad"] = PAD
     set_cache(cache_key, json.dumps(to_cache))
     return resultado
 

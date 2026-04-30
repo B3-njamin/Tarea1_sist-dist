@@ -35,7 +35,6 @@
                 <select class="form-select" id="cfg-policy">
                   <option value="allkeys-lfu">LFU — Least Frequently Used</option>
                   <option value="allkeys-lru">LRU — Least Recently Used</option>
-                  <option value="allkeys-random">FIFO (aproximado) — Random</option>
                 </select>
               </div>
               <div class="mb-3">
@@ -47,7 +46,7 @@
                 </select>
               </div>
               <div class="mb-3">
-                <label class="form-label fw-semibold">TTL (segundos) — 0 = sin expiración</label>
+                <label class="form-label fw-semibold">TTL (segundos) — 0 = sin caché (hit rate 0%)</label>
                 <input type="number" class="form-control" id="cfg-ttl" value="60" min="0"/>
               </div>
               <button class="btn btn-dark w-100" onclick="applyConfig()">Aplicar Configuración</button>
@@ -134,7 +133,6 @@
             <option value="all">Todas</option>
             <option value="allkeys-lfu">LFU</option>
             <option value="allkeys-lru">LRU</option>
-            <option value="allkeys-random">FIFO</option>
           </select>
         </div>
         <div class="col-md-2" id="fix-memory-col">

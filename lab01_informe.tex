@@ -19,12 +19,10 @@
 \usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{amsmath}
-
 \definecolor{codegreen}{rgb}{0,0.6,0}
 \definecolor{codegray}{rgb}{0.5,0.5,0.5}
 \definecolor{codepurple}{rgb}{0.58,0,0.82}
 \definecolor{backcolour}{rgb}{0.95,0.95,0.92}
-
 \lstdefinestyle{mystyle}{
     backgroundcolor=\color{backcolour},
     commentstyle=\color{codegreen},
@@ -43,29 +41,21 @@
     showtabs=false,
     tabsize=2
 }
-
 \lstset{style=mystyle}
-
 \renewcommand{\tablename}{Tabla}
 \usepackage{fancyhdr}
 \pagestyle{fancy}
-
 \begin{document}
-
 \title{\Huge{Tarea 1 Sistemas Distribuidos} \\
   \large Plataforma de análisis de preguntas y respuestas en Internet}
-\author{\\Dante Libiot, dante.libiot@mail.udp.cl\\ \\ \textbf{Profesor: } Nicolás Hidalgo}
+\author{\\Dante Libiot, dante.libiot@mail.udp.cl\\ Benjamin Jimenez, benjamin.jimenez4@mail.udp.cl \\ \textbf{Profesor: } Nicolás Hidalgo}
 \date{Abril, 2026}
 \maketitle
-
 \tableofcontents
-
 \newpage
-
 % ============================================================
 \section{Introducción}
 % ============================================================
-
 El objetivo de este trabajo es diseñar e implementar un sistema de caché distribuido para
 optimizar consultas geoespaciales sobre edificaciones en Santiago. El problema es simple:
 cuando se consulta repetidamente la misma información, recalcular la respuesta cada vez
@@ -80,7 +70,6 @@ lo que lo hace apropiado en un contexto distribuido.
 % ============================================================
 \section{Diseño de la Arquitectura}
 % ============================================================
-
 \subsection{Descripción General}
 
 El sistema sigue una \textbf{arquitectura cliente-servidor de dos capas (2-tier)}.
@@ -265,7 +254,7 @@ en Redis y el hit rate sube considerablemente respecto a la distribución unifor
 \subsubsection{Políticas de Evicción}
 
 Cuando el caché se llena, Redis elimina entradas según la política configurada. Se
-evalúan tres:
+evalúan dos:
 
 \textbf{LFU (Least Frequently Used)}: elimina la entrada menos consultada en total.
 Es la política esperada como mejor bajo Zipf, porque preserva exactamente las zonas
@@ -276,42 +265,47 @@ consultada. Funciona bien bajo distribución uniforme donde no hay un patrón cl
 popularidad. Bajo Zipf puede eliminar entradas populares si no fueron consultadas
 recientemente, aunque en el largo plazo son las más pedidas.
 
-\textbf{FIFO (First In, First Out)}: elimina la entrada más antigua sin considerar
-frecuencia ni recencia. Se incluye como contraste negativo: al ignorar el patrón de
-acceso, se espera que sea la peor política en ambas distribuciones.
-
-La hipótesis es: LFU $>$ LRU $>$ FIFO bajo Zipf, y LRU $\approx$ LFU $>$ FIFO
-bajo distribución uniforme.
+La hipótesis es: LFU $>$ LRU bajo distribución Zipf, y LRU $\approx$ LFU bajo
+distribución uniforme.
 
 \subsubsection{TTL}
 
 El dataset es \textbf{estático}: el CSV nunca cambia durante la ejecución, por lo que
 el TTL no sirve para mantener datos frescos. Su función real aquí es controlar cuánto
-tiempo vive una entrada en el caché, lo que afecta directamente el hit rate: sin TTL
-las entradas nunca expiran y el hit rate es máximo; con TTL bajo las entradas se
-regeneran constantemente y el hit rate cae.
+tiempo vive una entrada en el caché, lo que afecta directamente el hit rate.
 
-Los valores de TTL se definieron como fracciones de la duración total del experimento
-$T = 180$ s (18.000 consultas $\times$ 10 ms/consulta):
+Se intentó definir los valores de TTL como fracciones de la duración del experimento,
+pero se descartó ese enfoque porque la duración varía según el TTL configurado: con
+TTL alto hay más hits y cada hit involucra leer y deserializar $\sim$160 KB de Redis,
+lo que agrega latencia real al experimento. Con TTL=0 todo se calcula desde pandas y
+el experimento termina antes. Esta variación hace que el TTL como fracción de $T$ no
+sea un parámetro controlable de forma reproducible.
+
+Se optó por valores absolutos que permiten observar el efecto de distintas ventanas de
+expiración de forma independiente de la duración del experimento:
 
 \begin{table}[H]
 \centering
-\begin{tabular}{llll}
+\begin{tabular}{ll}
 \toprule
-\textbf{TTL} & \textbf{Valor} & \textbf{Fracción de $T$} & \textbf{Interpretación} \\
+\textbf{TTL (s)} & \textbf{Interpretación} \\
 \midrule
-$0$ s              & 0 s      & 0\%   & Sin caché: ninguna entrada se retiene \\
-$0{,}25 \cdot T$ s & 45 s     & 25\%  & Las entradas expiran en el primer cuartil \\
-$0{,}50 \cdot T$ s & 90 s     & 50\%  & Las entradas duran la mitad del experimento \\
-$0{,}75 \cdot T$ s & 135 s    & 75\%  & Las entradas duran tres cuartos del experimento \\
-Sin TTL            & $\infty$ & 100\% & Hit rate máximo: nada expira \\
+0   & Sin caché: ninguna entrada se retiene, hit rate = 0\% \\
+85  & Ventana corta: las entradas expiran frecuentemente \\
+170 & Ventana media: las entradas duran varios minutos \\
+200 & Ventana media-alta \\
+600 & Ventana larga: las entradas sobreviven casi todo el experimento \\
 \bottomrule
 \end{tabular}
-\caption{Valores de TTL. $T = 180$ s = 18.000 consultas $\times$ 10 ms/consulta.}
+\caption{Valores de TTL evaluados (absolutos en segundos).}
 \end{table}
 
-Los extremos (TTL=0 y sin TTL) son referencias teóricas. Los tres valores intermedios
-permiten observar cómo cambia el hit rate a medida que las entradas viven más tiempo.
+TTL=0 actúa como caso borde inferior: no se guarda nada en Redis y el hit rate es 0\%.
+Los valores intermedios permiten observar cómo aumenta el hit rate a medida que las
+entradas viven más tiempo. Se observó empíricamente que con 18.000 consultas y TTL=600
+el hit rate llegó al 85\% pero seguía creciendo al terminar el experimento, lo que
+indica que el sistema no alcanzó el estado estacionario. Con un mayor número de consultas
+se estima que el hit rate converge hacia $\sim$88\% bajo distribución Zipf con LFU.
 
 \subsubsection{Espacio de Claves y Decisión de Precisión de \texttt{confidence\_min}}
 
@@ -415,21 +409,308 @@ con valores extremos, ocultando problemas reales de rendimiento.
 
 \subsection{Resultados}
 
-\textit{Esta sección se completará con los resultados empíricos de los experimentos,
-incluyendo gráficos comparativos de hit rate, latencia, throughput y eviction rate.}
+\subsubsection{Análisis de Variación de Tiempos de Vida (TTL)}
+
+Para evaluar el impacto del tiempo de vida (TTL) en el rendimiento del sistema, se configuró
+un escenario base utilizando la distribución de tráfico Zipf, una política de reemplazo LFU
+y una memoria máxima de 500MB. Se enviaron 18.000 consultas, variando el TTL y monitoreando
+el comportamiento asintótico de las métricas.
+
+\begin{itemize}
+    \item \textbf{Hit rate y eficiencia del caché}\\
+    El Hit Rate exhibe el comportamiento logarítmico esperado frente al incremento del TTL,
+    dictado por la localidad temporal dentro de la distribución Zipf. Como se observa en la
+    Figura~\ref{fig:ttl_hitrate}, partiendo de un 0\% para $TTL=0s$, el sistema escala
+    progresivamente a un 73\% con $TTL=85s$, alcanzando un 85\% con $TTL=600s$.
+
+    La curva presenta rendimientos marginales decrecientes en la eficiencia del caché. Además,
+    al finalizar la inyección de las 18.000 consultas bajo $TTL=600s$, el \textit{Hit Rate}
+    continuaba aumentando, evidenciando que el sistema se encontraba aún en su fase de
+    calentamiento. Se proyecta que, con un volumen mayor de peticiones, la métrica convergería
+    asintóticamente hacia un $\sim$88\%. Esta tendencia se corrobora con la eficiencia del caché
+    (Figura~\ref{fig:ttl_eficiencia}): el sistema se vuelve eficiente con TTL alrededor de
+    $170$--$200$ segundos, y desde ese punto el beneficio adicional al aumentar el TTL es
+    casi nulo.
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{ZIPF_HitRate-ttl.jpeg}
+        \caption{Evolución del Hit Rate según el TTL.}
+        \label{fig:ttl_hitrate}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{ZIPF_Cache_eficiencia-ttl.jpeg}
+        \caption{Eficiencia de la caché variando el TTL.}
+        \label{fig:ttl_eficiencia}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Latencia (p50 y p95)}\\
+    La latencia mediana ($p50$), presente en la Figura~\ref{fig:ttl_p50}, decrece a medida
+    que aumenta el TTL, pasando de 0{,}66 ms ($TTL=0s$) a 0{,}34 ms ($TTL=600s$).
+
+    Sin embargo, la latencia del percentil 95 ($p95$) presenta un fenómeno particular
+    (Figura~\ref{fig:ttl_p95}). Con $TTL=85s$, el $p95$ alcanza los 1{,}53 ms, superando
+    marginalmente al sistema sin caché ($TTL=0s$, 1{,}50 ms). Esta anomalía se explica por la
+    expiración temprana de claves: las entradas se caducan constantemente durante la ejecución,
+    generando \textit{cache misses} sobre datos previamente cacheados. Al extender el TTL,
+    las expiraciones disminuyen drásticamente, estabilizando el $p95$ en 1{,}26 ms ($TTL=600s$).
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{ZIPF_Latencia_P50-ttl.jpeg}
+        \caption{Latencia mediana (p50) vs TTL.}
+        \label{fig:ttl_p50}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{ZIPF_Latencia_P95-ttl.jpeg}
+        \caption{Latencia de cola (p95) vs TTL.}
+        \label{fig:ttl_p95}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Throughput}\\
+    El Throughput (Figura~\ref{fig:ttl_throughput}) experimenta un incremento moderado y
+    progresivo (de 74 a 79 req/s) a medida que aumenta el TTL. Esta diferencia de $\sim$5\%
+    indica que el límite superior está acotado por el cliente generador de tráfico, en
+    específico por el \textbf{sleep} de 10 ms entre peticiones, lo que convierte a esta
+    métrica en un factor del lado del cliente más que en un límite del servidor.
+
+    \begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{ZIPF_Throughput-ttl.jpeg}
+    \caption{Throughput del sistema frente a variaciones de TTL.}
+    \label{fig:ttl_throughput}
+    \end{figure}
+\end{itemize}
+
+\subsubsection{Comparativa de Política de Reemplazo}
+
+En esta fase, se sometió al sistema a un escenario con diferentes políticas de reemplazo
+(LFU y LRU) bajo ambas distribuciones de tráfico y una memoria de 500MB. El objetivo es
+evaluar cómo cada política maneja la retención de las claves más populares cuando el espacio
+en caché se agota.
+
+\begin{itemize}
+    \item \textbf{Hit rate y eficiencia del caché}\\
+    Como se observa en la Figura~\ref{fig:pol_hitrate}, la política \textbf{LFU} se posiciona
+    como la más óptima, alcanzando un acierto cercano al 88\%, mientras que \textbf{LRU}
+    alcanza un $\sim$85\%. LFU es superior porque basa su decisión en la frecuencia histórica,
+    protegiendo de manera constante las consultas a las zonas más densas. Por otro lado, LRU
+    es marginalmente más susceptible a la polución de caché provocada por ráfagas de consultas
+    atípicas en momentos específicos.
+
+    La eficiencia del caché (Figura~\ref{fig:pol_eficiencia}) presenta lo inverso: \textbf{LRU}
+    supera a \textbf{LFU}. Aunque LFU maximiza los aciertos históricos, carece de un mecanismo
+    natural de envejecimiento temporal. Esto provoca que claves con ráfagas de popularidad en
+    etapas tempranas permanezcan en memoria indefinidamente, incluso si dejaron de ser relevantes.
+    LRU permite limpiar pasivamente la memoria de datos inactivos, lo que le otorga una rotación
+    de claves más saludable y un uso más eficiente del espacio frente a recursos limitados.
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{HitRate-Politica.jpeg}
+        \caption{Comparativa de Hit Rate según política de evicción.}
+        \label{fig:pol_hitrate}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{eficiencia_cache-politica.jpeg}
+        \caption{Eficiencia de caché por política de reemplazo.}
+        \label{fig:pol_eficiencia}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Latencia (p50 y p95)}\\
+    En cuanto a la latencia mediana ($p50$), Figura~\ref{fig:pol_p50}, ambas políticas
+    operan por encima de los 0{,}7 ms; sin embargo, la latencia de \textbf{LRU} es
+    consistentemente mayor que la de \textbf{LFU}. Esta diferencia es consecuencia directa
+    del mayor hit rate de LFU: al retener de manera más robusta las \textit{hot-keys}
+    históricas, resuelve una mayor proporción de consultas desde Redis sin delegar al backend.
+
+    Este comportamiento se replica en $p95$ (Figura~\ref{fig:pol_p95}). Dado que LRU es más
+    susceptible a desalojar claves temporalmente inactivas pero de alta recurrencia global,
+    LFU logra contener mejor los picos de latencia de cola.
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{Latencia_P50-politica.jpeg}
+        \caption{Política en la latencia mediana (p50).}
+        \label{fig:pol_p50}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{Latencia_P95-politica.jpeg}
+        \caption{Política en la latencia de cola (p95).}
+        \label{fig:pol_p95}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Throughput}\\
+    Las políticas LFU y LRU logran estabilizarse en torno a las 75 req/s
+    (Figura~\ref{fig:pol_throughput}), maximizando la capacidad del sistema bajo las
+    limitantes del cliente. La tasa de aciertos se relaciona directamente con la
+    capacidad total de concurrencia.
+
+    \begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{throughput-politica.jpeg}
+    \caption{Throughput según heurística.}
+    \label{fig:pol_throughput}
+    \end{figure}
+\end{itemize}
+
+\subsubsection{Análisis de Variación de Tamaño de Memoria}
+
+Para evaluar el impacto de la memoria en el rendimiento, se configuró un escenario base con
+$TTL=600s$, promediando LFU y LRU y ambas distribuciones. Se enviaron 18.000 consultas
+variando el límite máximo de memoria en 50MB, 200MB y 500MB.
+
+\begin{itemize}
+    \item \textbf{Hit rate y eficiencia del caché}\\
+    Los resultados demuestran una relación directa entre la capacidad de memoria y la tasa de
+    aciertos (Figura~\ref{fig:mem_hitrate}). La configuración más restrictiva (50MB) presenta
+    el \textit{Hit Rate} más bajo porque el espacio es insuficiente para albergar el conjunto
+    de trabajo principal, forzando reemplazos constantes. Al incrementar la memoria a 200MB
+    y 500MB, el \textit{Hit Rate} mejora progresivamente, ya que el sistema retiene las
+    consultas populares sin recurrir a reemplazos agresivos.
+
+    Esta dinámica se refleja en la eficiencia del caché (Figura~\ref{fig:mem_eficiencia}).
+    La configuración de 50MB muestra un rendimiento inferior debido a la alta rotación de
+    datos. Las capacidades mayores logran una eficiencia superior al estabilizar el
+    almacenamiento de las claves más consultadas.
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{Hit_memoria.jpeg}
+        \caption{Hit Rate según la memoria.}
+        \label{fig:mem_hitrate}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{eficiencia_cache_memoria.jpeg}
+        \caption{Eficiencia de la caché variando el tamaño de memoria.}
+        \label{fig:mem_eficiencia}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Latencia (p50 y p95)}\\
+    La latencia $p50$ (Figura~\ref{fig:mem_p50}) es más alta con 50MB. Al ampliar la memoria
+    a 200MB la latencia mediana cae drásticamente, y de 200MB a 500MB se estabiliza, dado que
+    la mayoría de las consultas ya son hits en ambos casos.
+
+    El mismo patrón se observa en $p95$ (Figura~\ref{fig:mem_p95}): la restricción de 50MB
+    genera los picos de latencia más altos del experimento. Los escenarios de 200MB y 500MB
+    absorben el tráfico de forma más estable al reducir la frecuencia de desalojos.
+
+    \begin{figure}[H]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{latencia_p50_memoria.jpeg}
+        \caption{Latencia mediana (p50) según la memoria.}
+        \label{fig:mem_p50}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{latencia_p95_memoria.jpeg}
+        \caption{Latencia de cola (p95) según la memoria.}
+        \label{fig:mem_p95}
+    \end{minipage}
+    \end{figure}
+
+    \item \textbf{Throughput}\\
+    La configuración de 50MB presenta el throughput más bajo al enfrentar una mayor tasa de
+    fallos de caché (Figura~\ref{fig:mem_throughput}). Aumentar la capacidad a 200MB y 500MB
+    incrementa el volumen de consultas procesadas por segundo.
+
+    \begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{throughput_memoria.jpeg}
+    \caption{Throughput según memoria.}
+    \label{fig:mem_throughput}
+    \end{figure}
+\end{itemize}
 
 % ============================================================
 \section{Discusión}
 % ============================================================
 
-\textit{Esta sección se completará respondiendo las preguntas del enunciado con base
-en los resultados obtenidos.}
+\begin{itemize}
+    \item \textbf{¿Cómo varía la tasa de aciertos (hit rate) y de fallos (miss rate) entre una distribución y otra?}\\
+    La variación entre ambas distribuciones es drástica y está dictada por la probabilidad de
+    recurrencia de las consultas. Bajo la \textbf{distribución Zipf}, el tráfico presenta alta
+    localidad temporal, donde un grupo pequeño de claves concentra la mayoría de las peticiones.
+    Esto permite que el sistema alcance tasas de aciertos superiores al 85\%, minimizando el
+    \textit{Miss Rate}. Por el contrario, bajo una \textbf{distribución Uniforme}, las peticiones
+    se dispersan equitativamente a lo largo de todo el espacio de claves posibles, provocando que
+    a una consulta se le expire su TTL antes de repetirse o que sea desalojada por falta de
+    memoria, lo que hace que el \textit{Hit Rate} decaiga y el \textit{Miss Rate} incremente.
+
+    \item \textbf{¿Qué distribución de tráfico genera un mayor estrés o beneficio para la caché y por qué?}\\
+    La distribución Uniforme genera mayor estrés. Al provocar una alta tasa de fallos constantes,
+    la caché entra en un ciclo donde se ve obligada a escribir, desalojar y reescribir datos ya
+    cacheados, transfiriendo toda la carga de procesamiento al backend y saturando la CPU.
+
+    En contraparte, la distribución Zipf genera un beneficio para la caché. Al concentrar el
+    tráfico en consultas populares, se cumple el propósito de diseño: absorber la carga pesada
+    resolviendo las peticiones en memoria, protegiendo al servidor de cálculos redundantes y
+    maximizando el throughput.
+
+    \item \textbf{¿Qué implicaciones tienen estos resultados para un escenario de aplicación real?}\\
+    Los resultados demuestran que el valor de un sistema de caché depende del comportamiento del
+    problema. En escenarios reales de análisis de densidad en Santiago, el tráfico es naturalmente
+    asimétrico (Zipfian): las zonas comerciales o centros urbanos densamente poblados reciben
+    muchas más consultas que las zonas periféricas.
+
+    Los datos comprueban que, dado que el mundo real no se comporta de manera uniforme, un diseño
+    con caché limitada (e.g., 200MB) pero con políticas de reemplazo adecuadas (LRU o LFU) es
+    capaz de absorber más del 85\% del tráfico, reduciendo los costos operativos y garantizando
+    tiempos de respuesta óptimos.
+\end{itemize}
 
 % ============================================================
 \section{Conclusiones}
 % ============================================================
 
-\textit{Esta sección se completará una vez finalizados los experimentos.}
+El presente informe demuestra que la integración de un caché distribuido en memoria (Redis) es
+una decisión que optimiza sistemas logísticos que procesan grandes volúmenes de datos geoespaciales.
+Al simular patrones de tráfico asimétricos realistas (distribución Zipf), se comprobó que el
+sistema es capaz de absorber de manera eficiente la carga y mitigar el estrés computacional
+del backend.
+
+A partir del análisis de las métricas de rendimiento, se llegaron a las siguientes conclusiones:
+
+\begin{itemize}
+    \item \textbf{Umbral de rentabilidad del TTL:} Un tiempo de vida cercano a los \textbf{200 segundos}
+    representa un punto óptimo. Superar este umbral aporta beneficios insignificantes, mientras que
+    un valor inferior induce una alta tasa de expiraciones tempranas, penalizando la latencia.
+
+    \item \textbf{Política de Reemplazo:} Aunque la política LFU maximiza el acierto histórico,
+    la \textbf{política LRU} es también una opción recomendada. Su mecanismo de limpieza pasiva
+    previene la retención indefinida de claves con popularidad pasajera, asegurando un uso eficiente
+    de la memoria frente a variaciones temporales en el patrón de acceso.
+
+    \item \textbf{Dimensionamiento:} No es necesario almacenar la totalidad del dataset en caché.
+    Una \textbf{memoria de 200MB} demostró ser suficiente para albergar las consultas frecuentes,
+    estabilizando el sistema sin incurrir en costos innecesarios de infraestructura.
+\end{itemize}
+
+En síntesis, una arquitectura de caché dimensionada al \textit{working set} real permite construir
+una plataforma altamente escalable, capaz de soportar alta concurrencia y mantener tiempos de
+respuesta bajos.
 
 % ============================================================
 \section{Referencias}
@@ -448,4 +729,3 @@ en los resultados obtenidos.}
 \end{enumerate}
 
 \end{document}
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
