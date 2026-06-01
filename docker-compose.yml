@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
 
   redis-cache:
@@ -10,17 +8,67 @@ services:
     networks:
       - sd-network
 
+  kafka:
+    image: apache/kafka:latest
+    hostname: kafka
+    user: "root"
+    ports:
+      - "9092:9092"
+    environment:
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Q"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - apache-kafka-data:/tmp/kafka-logs
+    # Healthcheck nativo para confirmar que el puerto y broker están operativos
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 15s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    networks:
+      - sd-network
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=LocalCluster
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
+    depends_on:
+      # Esperar a que el healthcheck de kafka pase antes de iniciar
+      kafka:
+        condition: service_healthy
+    networks:
+      - sd-network
+
   server-backend:
     build: ./server/backend
     ports:
       - "8000:8000"
     volumes:
-      - ./967_buildings.csv:/app/967_buildings.csv:ro
+      # - ./967_buildings.csv:/app/967_buildings.csv:ro
+      - ./test_buildings.csv:/app/967_buildings.csv:ro
       - sqlite-data:/app/data
     depends_on:
-      - redis-cache
+      # Al usar formato de diccionario para kafka, redis también debe usarlo
+      redis-cache:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     environment:
       - REDIS_HOST=redis-cache
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
     networks:
       - sd-network
 
@@ -55,6 +103,7 @@ services:
 
 volumes:
   sqlite-data:
+  apache-kafka-data:
 
 networks:
   sd-network:

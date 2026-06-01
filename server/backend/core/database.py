@@ -28,5 +28,10 @@ class Experiment(Base):
     cache_efficiency = Column(Float)
     duration_seconds = Column(Float)
 
+    retry_rate       = Column(Float, default=0.0)
+    recovery_rate    = Column(Float, default=0.0)
+    dlq_rate         = Column(Float, default=0.0)
+    backlog_size     = Column(Integer, default=0)
+    recovery_time    = Column(Float, default=0.0)
 
 Base.metadata.create_all(bind=engine)
