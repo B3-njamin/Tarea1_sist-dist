@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api import api_router
 
-app = FastAPI(title="Cliente Generador de Tráfico - Tarea 1 SD")
+app = FastAPI(title="Cliente Generador de Tráfico - Tarea 2 SD")
 
 app.add_middleware(
     CORSMiddleware,
