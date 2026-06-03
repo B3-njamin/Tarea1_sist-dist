@@ -1,10 +1,11 @@
+
 services:
 
   redis-cache:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: redis-server --maxmemory 50mb --maxmemory-policy allkeys-lfu
+    command: redis-server --maxmemory 2mb --maxmemory-policy allkeys-lfu
     networks:
       - sd-network
 
@@ -28,7 +29,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
     volumes:
       - apache-kafka-data:/tmp/kafka-logs
-    # Healthcheck nativo para confirmar que el puerto y broker están operativos
+    # Healthcheck estricto: evita que los otros contenedores fallen al arrancar
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
       interval: 15s
@@ -46,7 +47,6 @@ services:
       - KAFKA_CLUSTERS_0_NAME=LocalCluster
       - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
     depends_on:
-      # Esperar a que el healthcheck de kafka pase antes de iniciar
       kafka:
         condition: service_healthy
     networks:
@@ -57,11 +57,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # - ./967_buildings.csv:/app/967_buildings.csv:ro
       - ./test_buildings.csv:/app/967_buildings.csv:ro
       - sqlite-data:/app/data
     depends_on:
-      # Al usar formato de diccionario para kafka, redis también debe usarlo
       redis-cache:
         condition: service_started
       kafka:
@@ -69,6 +67,25 @@ services:
     environment:
       - REDIS_HOST=redis-cache
       - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - PYTHONUNBUFFERED=1
+    networks:
+      - sd-network
+
+  worker:
+    build: ./server/backend
+    command: python worker.py
+    volumes:
+      - ./test_buildings.csv:/app/967_buildings.csv:ro
+      - sqlite-data:/app/data
+    depends_on:
+      redis-cache:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    environment:
+      - REDIS_HOST=redis-cache
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - PYTHONUNBUFFERED=1
     networks:
       - sd-network
 
@@ -86,9 +103,14 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - server-backend
+      server-backend:
+        condition: service_started
+      kafka:
+        condition: service_healthy
     environment:
       - SERVER_URL=http://server-backend:8000
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - PYTHONUNBUFFERED=1
     networks:
       - sd-network
 
