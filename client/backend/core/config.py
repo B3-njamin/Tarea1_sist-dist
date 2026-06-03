@@ -1,12 +1,20 @@
 import os
+from typing import Dict, Any, List #Tipado explicito 
 
-SERVER_URL = os.getenv("SERVER_URL", "http://server-backend:8000")
+SERVER_URL: str = os.getenv("SERVER_URL", "http://server-backend:8000")
 
-ZONAS   = ["Z1", "Z2", "Z3", "Z4", "Z5"]
-QUERIES = ["q1", "q2", "q3", "q4", "q5"]
 
-# Estado del experimento en curso (compartido entre service y router)
-progress = {
+# CONFIGURACIÓN PARA APACHE KAFKA
+
+KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_TOPIC_QUERIES: str = os.getenv("KAFKA_TOPIC_QUERIES", "queries-main")
+
+
+ZONAS: List[str] = ["Z1", "Z2", "Z3", "Z4", "Z5"]
+QUERIES: List[str] = ["q1", "q2", "q3", "q4", "q5"]
+
+
+progress: Dict[str, Any] = {
     "running":      False,
     "total":        0,
     "completed":    0,
