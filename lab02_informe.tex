@@ -1,0 +1,329 @@
+\documentclass[letter,12pt]{article}
+\usepackage[paperheight=27.94cm,paperwidth=21.59cm,bindingoffset=0in,left=3cm,right=2.0cm,top=3.5cm,bottom=2.5cm,headheight=200pt,headsep=1.0\baselineskip]{geometry}
+\usepackage{graphicx,lastpage}
+\usepackage{upgreek}
+\usepackage{censor}
+\usepackage[spanish,es-tabla]{babel}
+\usepackage{pdfpages}
+\usepackage{tabularx}
+\usepackage{adjustbox}
+\usepackage{xcolor}
+\usepackage{colortbl}
+\usepackage{rotating}
+\usepackage{multirow}
+\usepackage[utf8]{inputenc}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+\lstset{style=mystyle}
+\renewcommand{\tablename}{Tabla}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+
+\begin{document}
+
+\title{\Huge{Tarea 2 Sistemas Distribuidos} \\
+  \large Procesamiento, Resiliencia y Fallback con Apache Kafka}
+\author{\\Dante Libiot, dante.libiot@mail.udp.cl\\ Benjamin Jimenez, benjamin.jimenez4@mail.udp.cl \\ \textbf{Profesor: } Nicolás Hidalgo}
+\date{Junio, 2026}
+\maketitle
+
+\newpage
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Introducción}
+% ============================================================
+En este proyecto se implementó una plataforma distribuida para el análisis de consultas geoespaciales utilizando el dataset Google Open Buildings, con una capa de caché (Redis) que demostró reducir la latencia bajo patrones de tráfico asimétricos (Zipf). Sin embargo, dicha arquitectura presentaba una comunicación entre módulos puramente síncrona. Poco óptimo bajo escenarios de alta concurrencia o fallas temporales del servidor, el sistema pudo experimentar encolamiento por cuellos de botella, pérdida de consultas y degradación del rendimiento.
+\\
+Esta etapa se basa en diseñar e implementar una evolución arquitectónica orientada a los eventos mediante la incorporación de \textbf{Apache Kafka}. El problema a resolver es el acoplamiento: el cliente no debe esperar a que el servidor termine de procesar para continuar inyectando tráfico. Para ello, se implemento la solución de introducir un sistema de colas (message broker) que separe el Generador de Tráfico de los Generadores de Respuestas (Workers).
+\\
+Mediante esta arquitectura asíncrona, el sistema es capaz de tolerar picos masivos de carga almacenándolos en un \textit{Backlog}, implementar tolerancia a fallos mediante políticas de reintento, y aislar mensajes irrecuperables a través de una \textbf{Dead Letter Queue (DLQ)} despues de una cierta cantidad de intentos, garantizando resiliencia en un entorno distribuido.
+
+% ============================================================
+\section{Diseño de la Arquitectura}
+% ============================================================
+\subsection{Descripción General}
+
+El sistema migra hacia una \textbf{arquitectura basada en eventos y microservicios desacoplados}. El flujo síncrono HTTP es reemplazado por un Productor-Consumidor apoyado por \textit{topics} de mensajería. 
+\\
+La nueva topología de diseño opera de la siguiente manera: el Generador de Tráfico (Cliente) inyecta asíncronamente eventos JSON al tópico principal de Kafka a muy alta velocidad. Los \textit{Workers} (consumidores independientes) extraen estos mensajes a su propio ritmo. Si el procesamiento de una consulta es exitoso, la respuesta se almacena en Redis y el consumidor confirma el mensaje (\textit{commit}). Si ocurre un fallo en el procesamiento, el Worker enruta el mensaje a recuperación o aislamiento, manteniendo la estabilidad del sistema.
+
+\subsection{Componentes Principales}
+
+\subsubsection{Cliente (Generador de Tráfico)}
+Actúa como inyector de tráfico. En lugar de hacer solicitudes HTTP como en la tarea pasada, utiliza \texttt{confluent\_kafka.Producer} de manera asíncrona (\textit{asyncio}). Permitiendo simular inyecciones de hasta 10.000 consultas en segundos sin bloquear el Event Loop local. Adicionalmente, cuenta con una interfaz web (Dashboard) que permite configurar patrones de distribución (Uniforme o Zipf) e inyectar fallos controlados (\textit{Poison Pills}) para pruebas de ingeniería de caos (\textit{Chaos Testing}).
+
+\subsubsection{Broker de Mensajería (Apache Kafka)}
+El centro de la arquitectura. Gestiona tres tópicos fundamentales:
+\begin{itemize}
+    \item \texttt{queries-main}: Recibe el flujo principal de consultas desde el Productor.
+    \item \texttt{queries-retry}: Sala de espera para mensajes que sufrieron fallos temporales de procesamiento y requieren un reitento.
+    \item \texttt{queries-dlq}: La \textit{Dead Letter Queue}, destino final para mensajes irrecuperables.
+\end{itemize}
+
+\subsubsection{Workers Consumidores (Generadores de Respuesta)}
+Microservicios distribuidos que usan de forma concurrente a los tópicos \texttt{queries-main} y \texttt{queries-retry} a través de \textit{Consumer Group} (\texttt{gis-workers-group}). Estos consumidores antes de procesar la lógica, consultan a Redis. Si hay un \textit{cache miss}, ejecutan el cálculo (simulando un retraso) e intentan guardar el resultado.
+
+\subsubsection{Almacenamiento de Estado y Métricas (Redis)}
+Este almacenamiento operar como caché LFU de 2MB limitados intencionalmente. Registra tasas de éxito, fallos, reintentos y evicciones en tiempo real, permitiendo que el Dashboard del Servidor calcule el \textit{Throughput} y el \textit{Backlog Size} sin consultar las APIs internas de Kafka, pues ambos reciben los mismos valores y el dashboard los visualiza.
+
+% ============================================================
+\section{Implementación}
+% ============================================================
+
+\subsection{Mecanismos de Fallback y Resiliencia}
+
+Para garantizar una entrega \textit{At-Least-Once} y evitar la pérdida silenciosa de mensajes frente a caídas imprevistas de un contenedor, se tomó la decisión de: \textbf{desactivar el auto-commit} en el consumidor de Kafka (\texttt{enable.auto.commit=False}).
+\\
+El \textbf{offset} del mensaje solo avanza de forma explícita mediante un \texttt{consumer.commit(msg)} cuando ocurre una de las siguientes condiciones de cierre:
+\begin{enumerate}
+    \item El mensaje fue procesado exitosamente y guardado en la caché.
+    \item El mensaje falló (teniendo un limite de $3$ reintentos, para ofrecer un balance entre la tolerancia a fallos y la prevención de bloqueos prolongados en las particiones de kafka) y fue delegado asíncronamente al tópico de reintentos (\texttt{queries-retry}).
+    \item El mensaje superó el límite de reintentos y fue enrutado al tópico terminal (\texttt{queries-dlq}).
+\end{enumerate}
+
+\subsection{Escenarios de Fallo Controlado (Chaos Testing)}
+
+Para evaluar la tolerancia a fallos, se implementó una \textbf{Poison Pill determinística}. A través de la interfaz del Cliente, el evaluador puede inyectar tráfico malicioso. Cuando el Productor recibe esta instrucción, genera \textit{payloads} con condiciones forzadas que el modelo de negocio rechaza (específicamente, \texttt{zona "Z5"} y \texttt{confianza minima mayor a $0.90$}). 
+\\
+El \textit{Worker} intercepta esta anomalía lanzando una excepción (\texttt{ValueError}) de forma controlada. Al capturar el error, el sistema incrementa el contador de intentos del payload, envía la telemetría a Redis (\texttt{stats:retry\_rate}), reencola el mensaje en Kafka, e intenta procesarlo nuevamente hasta enviarlo a la DLQ (\texttt{stats:dlq\_rate}) cuando pase le límite de intentos.
+
+\subsection{Estructura del Payload}
+
+Para garantizar trazabilidad distribuida, cada consulta inyectada a Kafka respeta el siguiente JSON:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Campo} & \textbf{Tipo} & \textbf{Descripción} \\
+\midrule
+\texttt{id}               & STRING & Identificador único UUIDv4 \\
+\texttt{timestamp}        & FLOAT  & Tiempo de origen en milisegundos \\
+\texttt{tipo}             & STRING & Tipo de consulta (Q1--Q5) \\
+\texttt{intentos}         & INT    & Contador de fallos (inicializado en 0) \\
+\texttt{data}             & OBJECT & Parámetros específicos (\texttt{zona}, \texttt{confidence}) \\
+\bottomrule
+\end{tabular}
+\caption{Estructura del mensaje JSON inyectado en Kafka.}
+\end{table}
+
+% ============================================================
+\section{Experimentos y Resultados}
+% ============================================================
+
+\subsection{Decisiones de Diseño y Optimización}
+
+\subsubsection{Cálculo Dinámico de Métricas Asíncronas}
+En una arquitectura síncrona, el cronómetro del experimento termina cuando el cliente recibe el último \textit{HTTP 200}. En este esquema asíncrono, el cliente termina de inyectar 5.000 mensajes en apenas unos segundos. Si el Dashboard detuviese el \textit{polling} en ese instante, ignoraría el trabajo en segundo plano de Kafka. 
+\\
+Por ello, se rediseñó el backend del servidor para que el experimento se considere ``En Curso'' mientras el \textbf{Backlog Size} sea mayor a cero. El \textit{Backlog} se calcula algorítmicamente restando los mensajes procesados exitosamente y los mensajes en la DLQ al total proyectado por el inyector, es decir, el conjunto de mensajes procesados ya sea exitoso o fallido.
+
+\subsubsection{Dimensión de Memoria y Cuellos de Botella}
+Se restringió la memoria máxima de Redis intencionalmente a \textbf{2MB} con una política \texttt{allkeys-lfu}. Asimismo, dentro de la lógica del \textit{Worker}, se introdujo un \textit{sleep} aleatorio de entre 0.2 y 0.5 segundos para simular una carga de base de datos (PostGIS). Esta configuración fuerza al clúster a experimentar \textit{Lag} visible y presión de desalojos (\textit{Evictions}), permitiendo evaluar el comportamiento bajo estrés "real".
+
+\subsection{Métricas de Evaluación}
+
+A las métricas de la etapa anterior (Hit rate, Throughput, Evictions) se incorporaron los siguientes indicadores:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lp{10cm}}
+\toprule
+\textbf{Métrica} & \textbf{Definición} \\
+\midrule
+Backlog size     & Cantidad de mensajes pendientes en Kafka (target - procesados). \\
+Retry rate       & Consultas reenviadas a tópicos de reintento. \\
+Recovery rate    & Consultas recuperadas exitosamente tras fallos temporales. \\
+DLQ rate         & Consultas enviadas a la Dead Letter Queue. \\
+Recovery time    & Tiempo transcurrido desde el primer fallo hasta que la cola de mensajes se vacía (Backlog = 0). \\
+\bottomrule
+\end{tabular}
+\caption{Nuevas métricas de resiliencia.}
+\end{table}
+
+\newpage
+
+% ============================================================
+\section{Análisis y Discusión}
+% ============================================================
+
+El despliegue de la arquitectura basada en eventos con Apache Kafka expuso diferencias fundamentales frente a su predecesor síncrono, requiriendo un análisis profundo de las métricas obtenidas y de las decisiones de diseño adoptadas.
+
+\subsection{Desacoplamiento y Reinterpretación de la Latencia}
+Durante las pruebas de carga (inyección de 5.000 consultas en unos segundos), se observó un aumento extremo en la latencia, registrando valores de $p50 \approx 304$ ms y $p95 \approx 575$ ms [contrastados con las latencias de la tarea 1 hubo un aumento significativo por el efecto de cola]. En esta arquitectura distribuida la latencia total se define como la suma del tiempo en cola (\textit{Backlog}) y el tiempo de procesamiento. El elevado $p95$ no refleja una degradación del \textit{Throughput}, sino el tiempo máximo que el final de los mensajes debió esperar en el clúster. Kafka absorbió exitosamente el choque de tráfico masivo, priorizando la integridad de los datos sobre la inmediatez. Y por ello, la carga masiva de mensajes se encolan para su posterior procesado.
+
+\subsection{Resiliencia y Semántica de Entrega (At-Least-Once)}
+La decisión de configurar el parámetro \texttt{enable.auto.commit = False} en los consumidores probó ser un cambio crítico para garantizar la tolerancia a fallos. Frente a caídas abruptas de un contenedor \textit{Worker}, la confirmación manual de \textit{offsets}, la cual fue condicionada a la persistencia exitosa en Redis o al enrutamiento a colas secundaria, demostró mantener una \textit{At-Least-Once}, garantizando que ningún evento generado por el cliente se pierda silenciosamente, evidenciando que ocurre con cada mensaje.
+
+\subsection{Ingeniería de Caos y Aislamiento de Fallos (DLQ)}
+La inyección de la \textit{Poison Pill} (eventos preconfigurados para fallar algorítmicamente a propósito) demostró el comportamiento del sistema bajo condiciones adversas controladas. El mecanismo de recuperación operó de la siguiente manera: reencolando los mensajes (\texttt{queries-retry}) hasta el límite de \texttt{MAX\_RETRIES = 3}. Posteriormente, se activó la \textit{Dead Letter Queue} (DLQ) por superar los reintentos permitidos, encapsulando la "basura" informacional y permitiendo que el \textit{Recovery Time} del clúster se detuviera exitosamente una vez vaciado el \textit{Backlog} con los mensajes en cola.
+
+\subsection{Escalabilidad Horizontal}
+En el experimento se probó un escalamiento dinámico (\texttt{--scale worker=3}). Al compartir el mismo \texttt{group.id}, Kafka rebalancea automáticamente las particiones del tópico \texttt{queries-main}. El resultado fue una aceleración proporcional del \textit{Throughput} y una caída pronunciada del \textit{Backlog Size}, confirmando que el cuello de botella impuesto por un único nodo se mitiga distribuyendo la carga sin necesidad de detener el clúster.
+
+
+%------------------------------------------------------
+\section{Resultados Visuales}
+%------------------------------------------------------
+
+La presente sección consolida la evidencia recolectada para validar el diseño, corroborando el cumplimiento de los requerimientos como resiliencia, tolerancia a fallos, manejo asíncrono de sobrecargas y efectividad de la memoria caché.
+
+\subsection{Procesamiento de Cargas Asíncronas y Comportamiento de la Caché}
+
+Para evaluar el sistema, se inyectaron cargas masivas bajo distribuciones Uniforme y Zipf. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{5000uni.png}
+    \caption{Telemetría tras 5.000 consultas (Uniforme)}
+    \label{fig:dashboard_uniforme1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{Captura de pantalla 2026-06-03 224908.png}
+    \caption{ Evidencia el \textit{Hit Rate} y la activación de evicciones en Redis.}
+    \label{fig:dashboard_uniforme}
+\end{figure}
+
+La Figura \ref{fig:dashboard_uniforme} (Uniforme, 5.000 consultas) muestra un bajo \textit{Hit Rate} que a pasar del tiempo se fue regulando a ($9.94\%$) y una alta latencia $p95$ ($49542$ ms en aumento). Este valor refleja el tiempo de espera acumulado en el \textit{Backlog} de Kafka, confirmando la absorción asíncrona de la carga. 
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{Captura de pantalla 2026-06-03 222606.png}
+    \caption{Telemetría tras 20.000 consultas (Zipf).}
+    \label{fig:dashboard_zipf}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{Captura de pantalla 2026-06-03 222617.png}
+    \caption{ Evidencia el \textit{Hit Rate} y la activación de evicciones en Redis.}
+    \label{fig:placeholder}
+\end{figure}
+
+En contraste, la Figura \ref{fig:dashboard_zipf} (Zipf, 20.000 consultas) evidencia la eficacia de la caché: el \textit{Hit Rate} asciende y se registran las evicciones, confirmando el correcto funcionamiento de la política \texttt{allkeys-lfu} bajo el estricto límite de 2MB. Cabe mencionar que al tomar las capturas la gran latencia que existe es provocado dado que habian más peticiones por detrás procesandoce, lo que aumento significativamente su valor.
+
+\subsection{Ingeniería de Caos y Aislamiento de Fallos}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{inyeccion poison.png}
+    \caption{Métricas de resiliencia tras inyectar 3.000 \textit{Poison Pills}. Se cuantifica la derivación a colas de reintento y su segregación en la DLQ.}
+    \label{fig:dashboard_poison}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{resultado posion.png}
+    \caption{Métricas con 3 workers y posion pill activada}
+    \label{fig:placeholder}
+\end{figure}
+
+La tolerancia a fallos se evaluó inyectando 3.000 cargas maliciosas (\textit{Poison Pills}) (Figura \ref{fig:dashboard_poison}). Los \textit{Workers} interceptaron los errores, generando exactamente 9.000 reintentos (\textit{Retry Rate}, equivalente al límite de 3 reintentos por consulta). Al agotar este límite, las anomalías fueron aisladas en la \textit{Dead Letter Queue} (\textit{DLQ Rate} = 3.000). El sistema restableció su \textit{Backlog} a cero en $1.391,80$ segundos (\textit{Recovery Time}), demostrando resiliencia estructural.
+
+\subsection{Persistencia y Consistencia en los Tópicos de Apache Kafka}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{Captura de pantalla 2026-06-03 222653.png}
+    \caption{Interfaz Kafka UI exponiendo el acumulado histórico persistido en los tres tópicos.}
+    \label{fig:kafka_topics}
+\end{figure}
+
+La Figura \ref{fig:kafka_topics} corrobora la consistencia del \textit{broker}. Los volúmenes reflejan el acumulado de las tres pruebas: \texttt{queries-main} persistió el histórico total de 28.000 mensajes (5.000 Uniforme + 3.000 Poison + 20.000 Zipf); \texttt{queries-retry} procesó los 9.000 reintentos; y \texttt{queries-dlq} almacenó los 3.000 mensajes aislados.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{Captura de pantalla 2026-06-03 222720.png}
+    \caption{Cargas útiles en \texttt{queries-retry}, evidenciando el avance iterativo del contador de intentos.}
+    \label{fig:kafka_retry_messages}
+\end{figure}
+
+Las Figuras \ref{fig:kafka_retry_messages} y \ref{fig:kafka_topics} confirman que los \textit{payloads} actualizaron sus contadores internamente antes del aislamiento, validando el correcto manejo manual de \textit{offsets} (\texttt{enable.auto.commit = False}).
+
+\subsection{Escalabilidad Dinámica de Consumidores}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{Captura de pantalla 2026-06-03 211159.png}
+    \caption{Comando Docker para la adición de réplicas de contenedores \textit{Worker} en caliente.}
+    \label{fig:docker_scale}
+\end{figure}
+
+
+Las Figuras \ref{fig:docker_scale} demuestran el escalamiento horizontal dinámico. Al solicitar tres réplicas de \textit{Workers}, estas se acoplaron exitosamente al \texttt{gis-workers-group}. Kafka rebalanceó automáticamente las particiones, distribuyendo la carga concurrente y optimizando el \textit{Throughput} global sin interrupciones del servicio.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{Captura de pantalla 2026-06-03 222631.png}
+    \caption{Indexación de las consultas que llegan a Kafka (Formato Json)}
+    \label{fig:placeholder}
+\end{figure}
+% ============================================================
+\section{Conclusiones}
+% ============================================================
+
+La migración de la arquitectura síncrona a un modelo asíncrono basado en Apache Kafka cumple bien con el objetivo de desacoplar la plataforma. El sistema demostró ser elástico, escalable y resiliente. 
+\\
+A partir del análisis experimental, se establecen las siguientes conclusiones:
+
+\begin{itemize}
+    \item \textbf{Manejo de Picos de Tráfico:} La arquitectura de colas es efectiva para proteger la capa de datos. Mientras el Productor inyecta cargas masivas de peticiones en menos de dos segundos, Kafka absorbe el choque (formando el \textit{Backlog}), permitiendo a los \textit{Workers} operar de manera estable según sus capacidades de I/O y a sus tiempos.
+    
+    \item \textbf{Eficacia del Aislamiento:} La implementación de una Dead Letter Queue, combinada con políticas de reintento, logró segregar el tráfico corrupto o fallido sin que ningún componente detuviera su ejecución, demostrando estabilidad arquitectónica a través del \textit{Chaos Testing}.
+
+    \item \textbf{Observabilidad:} La recolección de métricas desacopladas y su visualización en tiempo real es indispensable. Sin la capacidad de calcular dinámicamente el \textit{Backlog Size} y el \textit{Recovery Time}, sería imposible discernir si un sistema asíncrono falló silenciosamente o si simplemente se encuentra procesando la cola en segundo plano.
+\end{itemize}
+
+En síntesis, se logró la construcción de un sistema distribuido tolerante a fallos que gestiona recursos de forma eficiente bajo estrés, integrando con éxito la mensajería asíncrona, bases de datos en memoria y escalamiento basado en microservicios.
+
+% ============================================================
+\section{Referencias}
+% ============================================================
+
+\begin{itemize}
+    \item Google Open Buildings Dataset: \url{https://sites.research.google/gr/open-buildings/}
+    \item Apache Kafka Documentation: \url{https://kafka.apache.org/documentation/}
+    \item Redis Documentation: \url{https://redis.io/docs/}
+    \item Docker y Docker Compose Documentation: \url{https://docs.docker.com/}
+\end{itemize}
+
+\section*{Links}
+\begin{enumerate}
+    \item Repositorio de Github: \url{https://github.com/B3-njamin/Tarea1_sist-dist.git}
+    \item Video de funcionamiento: \url{https://drive.google.com/drive/folders/1Pkh_LShYw07PkBlw68yQ8McsnSp3h2lc?usp=drive_link}
+\end{enumerate}
+
+\end{document}
