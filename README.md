@@ -1,15 +1,18 @@
-# Tarea 1 — Sistemas Distribuidos 2026-1
+# Tarea 2 — Sistemas Distribuidos 2026-1
 
-**Autor:** Dante Libiot — dante.libiot@mail.udp.cl  
+**Autores:**
+- Dante Libiot — dante.libiot@mail.udp.cl  
+- Benjamín Jiménez — benjamin.jimenez4@mail.udp.cl  
+
 **Profesor:** Nicolás Hidalgo
 
-Sistema de caché distribuido con Redis para optimizar consultas geoespaciales sobre edificaciones en Santiago de Chile.
+Evolución a una arquitectura distribuida orientada a eventos utilizando **Apache Kafka**. El sistema desacopla el generador de tráfico (cliente) de los nodos de procesamiento (workers) mediante un enfoque asíncrono, garantizando alta disponibilidad, tolerancia a fallos y semántica de entrega *At-Least-Once* frente a sobrecargas y consultas maliciosas (uso de *Dead Letter Queue* y políticas de reintento).
 
 ---
 
 ## Descripción
 
-El sistema simula consultas de empresas de logística sobre zonas de Santiago. Las respuestas se guardan en Redis para evitar recalcularlas. Se evalúa el impacto de distintas políticas de evicción (LFU, LRU, FIFO), tamaños de caché (50MB, 200MB, 500MB), TTL y distribuciones de tráfico (uniforme y Zipf).
+El sistema inyecta peticiones de forma asíncrona hacia un *message broker* (Kafka). Los nodos consumidores (*Workers*) extraen y procesan las peticiones a su propio ritmo, validando resultados contra Redis. Se evalúa el comportamiento del clúster bajo estrés, midiendo métricas dinámicas como el *Throughput*, el tamaño del *Backlog* (mensajes en espera), latencias acumuladas, y tiempos de recuperación (*Recovery Time*) al inyectar fallos controlados (*Chaos Testing*).
 
 ---
 
@@ -18,17 +21,15 @@ El sistema simula consultas de empresas de logística sobre zonas de Santiago. L
 ```
 Tarea1_sist-dist/
 ├── server/
-│   ├── backend/        # FastAPI — procesa consultas Q1-Q5, gestiona Redis y métricas
-│   └── frontend/       # Dashboard HTML/JS — configuración, métricas en vivo e historial
+│   ├── backend/        # FastAPI — API de métricas, lee Redis y calcula Backlog/Recovery Time
+│   └── frontend/       # Dashboard HTML/JS — visualización de telemetría en vivo
 ├── client/
-│   ├── backend/        # FastAPI — generador de tráfico (Zipf y uniforme)
-│   └── frontend/       # HTML/JS — interfaz para lanzar experimentos
-├── docker-compose.yml
-└── lab01_informe.tex
+│   ├── backend/        # FastAPI — Productor Kafka (inyector masivo y Poison Pills)
+│   └── frontend/       # HTML/JS — interfaz para lanzar experimentos y Chaos Testing
+├── worker/             # Consumidor Kafka — procesa consultas, reintentos y enruta a DLQ
+├── docker-compose.yml  # Orquestador de servicios (Kafka, Zookeeper, Redis, App)
+└── lab02_informe.tex   # Informe técnico y análisis de resultados
 ```
-
----
-
 ## Requisitos
 
 - Docker
@@ -39,35 +40,31 @@ Tarea1_sist-dist/
 ## Cómo levantar el sistema
 
 ```bash
-docker-compose up --build
+docker-compose up --build -d
+docker-compose up --build 
 ```
 
 Luego abrir:
 - **Panel del Servidor:** http://localhost:3000
 - **Panel del Cliente:** http://localhost:3001
+- **Panel de Kafka:** http://localhost:8080
 
 ---
 
-## Flujo de uso
+## Escalamiento Horizontal
+Para demostrar la elasticidad del sistema agregando más workers en caliente:
 
-1. Ir al Panel del Servidor (puerto 3000) y configurar política de evicción, tamaño de memoria y TTL.
-2. Ir al Panel del Cliente (puerto 3001), seleccionar distribución y número de consultas.
-3. Iniciar el experimento y observar las métricas en vivo en el Panel del Servidor.
-4. Al terminar, revisar el historial y los gráficos comparativos en el Panel del Servidor.
-
+```bash
+docker-compose up -d --scale worker=3
+```
 ---
 
-## Consultas implementadas
-
-| Consulta | Descripción |
-|----------|-------------|
-| Q1 | Conteo de edificios por zona con filtro de confianza |
-| Q2 | Área promedio y total de edificaciones |
-| Q3 | Densidad de edificaciones por km² |
-| Q4 | Comparación de densidad entre dos zonas |
-| Q5 | Distribución del score de confianza en una zona |
-
----
+##Funcionamiento 
+- Levantar la infraestructura y abrir Kafka UI para verificar la creación de los tópicos (queries-main, queries-retry, queries-dlq).
+- Ir al Panel del Cliente (puerto 3001), seleccionar el patrón de distribución (Uniforme, Zipf o Poison Pill) y el número total de consultas.
+- Iniciar el experimento.
+- Ir al Panel del Servidor (puerto 3000) y observar en tiempo real la absorción de carga: formación y descenso del Backlog Size, latencias ($p50$/$p95$) y el Throughput.
+- En caso de inyectar fallos (Poison Pills), monitorear cómo el sistema aísla los errores revisando el Retry Rate, DLQ Rate y el Recovery Time.
 
 ## Dataset
 
